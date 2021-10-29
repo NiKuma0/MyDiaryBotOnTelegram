@@ -1,32 +1,29 @@
-import datetime as dt
-import asyncio
-from aiogram import types, Bot, executor, Dispatcher
+import asyncio, datetime as dt
+from aiogram import types, Dispatcher
 from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters import Text, state
-from aiogram.types.reply_keyboard import ReplyKeyboardRemove
+from aiogram.dispatcher.filters import state
 
 from keyboard import main_keyboard, form_keyboard
+from app.settings import DP, FORMAT_DATE, FORMAT_TIME, ADMINS
+from .db import Diary
 
-FORMAT = '%H:%M %d.%m.%Y'
-FORMAT_TIME = '%H:%M'
-FORMAT_DATE = '%d.%m.%Y'
-
+dp = DP
 
 class OrderCreate(state.StatesGroup):
     waiting_for_form = state.State()
     waiting_for_message = state.State()
 
 
-# @dp.message_handler(commands=['start', 'help'])
+@dp.message_handler(commands=['start', 'help'])
 async def send_welcome(message: types.Message):
+    print(message.chat.id)
     await message.answer(
         'Привет!\nтеперь я твой дневник!'
         'Чтобы зависать что-то нажми "Новая задача!"',
         reply_markup=main_keyboard
     )
 
-
-# @dp.message_handler(text='Новая задача!')
+@dp.message_handler(text='Новая задача!')
 async def new_dials(message: types.Message):
     date = dt.datetime.now()
     text = (f'Дата: {date.strftime(FORMAT_DATE)}\n'
@@ -45,50 +42,62 @@ def in_buttons(data: str):
     return delta
 
 
-# @dp.callback_query_handler()
+@dp.callback_query_handler(state=OrderCreate)
 async def change_message(data: types.CallbackQuery, state: FSMContext):
     now = dt.datetime.now()
-    state_date = await state.get_data()
-    date = state_date.get('date', now)
-    if data.data == 'done':
-        await state.update_data(date=date)
-        await OrderCreate.next()
-        await data.message.answer(
-            text='Напишите послание', reply_markup=ReplyKeyboardRemove())
-        return
-    date += in_buttons(data.data)
-    date = now if date < now else date
-    text = (f'Дата: {date.strftime(FORMAT_DATE)}\n'
-            f'Время: {date.strftime(FORMAT_TIME)}\n')
-    if data.message.text != text:
-        await data.message.edit_text(
-            text=text.format(
-                date.strftime(FORMAT_DATE), date.strftime(FORMAT_TIME)),
-            reply_markup=form_keyboard)
-        return await state.update_data(date=date)
-    return
+    state_data = await state.get_data()
+    obj = state_data.get('obj', None) or Diary(date=now, chat_id=data.message.chat.id)
+    error_text = ''
+    match data.data:
+        case 'done' if obj.date < now:
+            error_text = 'К сожалению, этот бот не может отправить сообщение в прошлое\n'
+            obj.date = now
+            await state.update_data(obj=obj)
+        case 'done':
+            await OrderCreate.next()
+            await state.update_data(obj=obj)
+            await data.message.edit_text(
+                text='Напишите послание',  # reply_markup=types.reply_keyboard.ReplyKeyboardRemove
+            )
+            return
+        case 'cancel':
+            await state.reset_data()
+            await state.finish()
+            await data.message.edit_text(text='Отменено')
+            return
+        case _:
+            obj.date += in_buttons(data.data)
+    text = (
+        error_text + 
+        f'Дата: {obj.date.strftime(FORMAT_DATE)}\n'
+        f'Время: {obj.date.strftime(FORMAT_TIME)}\n'
+    )
+    await state.update_data(obj=obj)
+    await data.message.edit_text(
+        text=text, reply_markup=form_keyboard
+    )
 
-
+@dp.message_handler(state=OrderCreate)
 async def finish(message: types.Message, state: FSMContext):
-    await state.update_data(message=message.text)
-    await message.answer('Готово!', reply_markup=main_keyboard)
-    data = await state.get_data()
+    state_data = await state.get_data()
+    obj = state_data.get('obj', None)
+    obj.message = message.text
+    obj.save()
+    await state.reset_data()
     await state.finish()
-    now = dt.datetime.now()
-    timedelta = data['date'] - now
-    print(timedelta.total_seconds())
-    await asyncio.sleep(timedelta.total_seconds())
-    await message.answer(data['message'])
+    await message.answer('Готово!', reply_markup=main_keyboard)
 
-
-def register(dp: Dispatcher):
-    dp.register_message_handler(send_welcome, commands=('start', 'help'))
-    dp.register_message_handler(
-        new_dials, Text(equals='Новая задача!', ignore_case=True)
-    )
-    dp.register_callback_query_handler(
-        change_message, state=OrderCreate.waiting_for_form
-    )
-    dp.register_message_handler(finish, state=OrderCreate.waiting_for_message)
-
-
+@dp.message_handler(commands=['start_polling'])
+async def check_db(message: types.Message):
+    if message.from_user.id not in ADMINS:
+        await message.answer(text='Вы не админ!')
+    while True:
+        ls = Diary.all(limit=1)
+        if len(ls) == 0:
+            await asyncio.sleep(1)
+            continue
+        obj = ls[0]
+        if obj.date <= dt.datetime.now():
+            await dp.bot.send_message(chat_id=obj.chat_id, text=obj.message)
+            obj.delete()
+        await asyncio.sleep(1)

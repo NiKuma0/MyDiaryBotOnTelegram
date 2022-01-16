@@ -9,7 +9,7 @@ This bot sends you a message to you don't forget about deals
 ## Технологии
 * Весь бот написан на языке 
 [**Python v3.10**](https://www.python.org/)
-* Для СУБД был использован [**SQLit**](https://www.sqlite.org/)
+* Для СУБД был использован [**SQLite**](https://www.sqlite.org/)
 * Также не обошлось без фраемворке 
 [**aiogram**](https://github.com/aiogram/aiogram)
 
